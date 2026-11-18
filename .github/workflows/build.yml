@@ -36,6 +36,10 @@ on:
         description: "Tambah MGLRU (patch dari repo Arkael)"
         type: boolean
         default: true
+      mglru_skip_regex:
+        description: "Lewati commit di patch yang subject-nya cocok regex ini (bukan MGLRU)"
+        required: false
+        default: "thermal|game_mode"
       mglru_patch_url:
         description: "URL patch MGLRU (format .patch)"
         required: true
@@ -110,14 +114,29 @@ jobs:
           git config user.email "kaell@users.noreply.github.com"
           curl -fLSs "${{ inputs.mglru_patch_url }}" -o mglru.patch
           ls -lh mglru.patch
-          grep -c '^From ' mglru.patch || true
-          if git am --3way mglru.patch; then
-            echo "MGLRU: patch terpasang"
-          else
-            git am --abort || true
-            echo "::error::Patch MGLRU gagal diterapkan ke branch ${{ inputs.source_ref }}"
-            exit 1
-          fi
+          rm -rf mg && mkdir mg
+          git mailsplit -omg mglru.patch > /dev/null
+          SKIP="${{ inputs.mglru_skip_regex }}"
+          echo "=== Daftar commit di patch ==="
+          for f in mg/*; do
+            echo "$(basename $f): $(grep -m1 '^Subject:' $f)"
+          done
+          echo "=== Menerapkan ==="
+          for f in mg/*; do
+            SUBJ=$(grep -m1 '^Subject:' "$f")
+            if [ -n "$SKIP" ] && echo "$SUBJ" | grep -qiE "$SKIP"; then
+              echo "SKIP  $SUBJ"
+              continue
+            fi
+            if git am "$f" >/dev/null 2>&1 || { git am --abort >/dev/null 2>&1; git am --3way "$f" >/dev/null 2>&1; }; then
+              echo "OK    $SUBJ"
+            else
+              git am --show-current-patch=diff 2>/dev/null | head -40 || true
+              git am --abort >/dev/null 2>&1 || true
+              echo "::error::GAGAL: $SUBJ"
+              exit 1
+            fi
+          done
           grep -n "LRU_GEN" mm/Kconfig | head -5
 
       - name: Tambah governor Kaelltzyy

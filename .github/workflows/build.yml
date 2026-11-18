@@ -328,6 +328,21 @@ jobs:
             -d ZRAM_DEF_COMP_LZO -d ZRAM_DEF_COMP_ZSTD -e ZRAM_DEF_COMP_LZ4 --set-str ZRAM_DEF_COMP "lz4"
           scripts/config --file out/.config -e COMPACTION
 
+          # Timer frequency 1000 Hz
+          scripts/config --file out/.config -d HZ_100 -d HZ_250 -d HZ_300 -e HZ_1000 --set-val HZ 1000
+
+          # Matikan debug (kurangi overhead)
+          scripts/config --file out/.config -d SCHED_DEBUG -d SCHEDSTATS -d DEBUG_PREEMPT \
+            -d LOCKDEP -d DEBUG_LOCK_ALLOC -d SLUB_DEBUG -d SLUB_DEBUG_ON -d PM_DEBUG
+
+          # Uclamp (boost task game dari user-space)
+          scripts/config --file out/.config -e UCLAMP_TASK -e UCLAMP_TASK_GROUP
+
+          # Optimasi -O3 (kalau symbol ada di source; KCFLAGS di bawah jadi fallback)
+          if grep -q "CC_OPTIMIZE_FOR_PERFORMANCE_O3" init/Kconfig; then
+            scripts/config --file out/.config -d CC_OPTIMIZE_FOR_PERFORMANCE -e CC_OPTIMIZE_FOR_PERFORMANCE_O3
+          fi
+
           # NTSYNC (built-in supaya tidak perlu modul)
           if [ "${NTSYNC_READY:-0}" = "1" ]; then
             scripts/config --file out/.config -e NTSYNC
@@ -343,7 +358,7 @@ jobs:
           scripts/config --file out/.config -d LOCALVERSION_AUTO
 
           make $MAKE_ARGS olddefconfig
-          make $MAKE_ARGS -j"$(nproc --all)" Image 2>&1 | tee build.log
+          make $MAKE_ARGS KCFLAGS="-O3" -j"$(nproc --all)" Image 2>&1 | tee build.log
 
           test -f out/arch/arm64/boot/Image || { echo "Build gagal: Image tidak ada"; exit 1; }
 
@@ -351,7 +366,7 @@ jobs:
         run: |
           ls -lh out/arch/arm64/boot/Image
           strings out/arch/arm64/boot/Image | grep -m1 "Linux version" || true
-          grep -E '^CONFIG_(LOCALVERSION|LTO_CLANG|CFI_CLANG|MODVERSIONS|KSU|KPROBES|NTSYNC|ZRAM|CPU_FREQ_DEFAULT_GOV)' out/.config || true
+          grep -E '^CONFIG_(HZ|SCHED_DEBUG|SCHEDSTATS|UCLAMP|CC_OPTIMIZE|LOCALVERSION|LTO_CLANG|CFI_CLANG|MODVERSIONS|KSU|KPROBES|NTSYNC|ZRAM|CPU_FREQ_DEFAULT_GOV)' out/.config || true
           cp out/.config kaelltzyy.config
 
       - name: Package AnyKernel3

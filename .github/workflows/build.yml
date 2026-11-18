@@ -43,7 +43,7 @@ on:
       mglru_skip_regex:
         description: "Lewati commit di patch yang subject-nya cocok regex ini (bukan MGLRU)"
         required: false
-        default: "thermal|game_mode"
+        default: "thermal|game_mode|nomount|path redirection"
       mglru_min_ttl_ms:
         description: "Default lru_gen min_ttl_ms (anti thrashing/soft-reboot, 0 = mati)"
         required: false

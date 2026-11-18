@@ -78,8 +78,8 @@ jobs:
       - name: Integrasi KernelSU-Next
         if: ${{ inputs.ksu_enable }}
         run: |
-          curl -fLS "https://raw.githubusercontent.com/${KSU_REPO}/${KSU_BRANCH}/kernel/setup.sh" -o /tmp/ksu_setup.sh
-          bash /tmp/ksu_setup.sh "${KSU_BRANCH}"
+          test -d drivers || { echo "Bukan di root source kernel: $(pwd)"; ls; exit 1; }
+          curl -fLSs "https://raw.githubusercontent.com/${KSU_REPO}/${KSU_BRANCH}/kernel/setup.sh" | bash -s "${KSU_BRANCH}"
           ls -la
 
       - name: Tambah governor Kaelltzyy

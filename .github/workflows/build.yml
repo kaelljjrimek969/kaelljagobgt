@@ -36,6 +36,10 @@ on:
         description: "Tambah MGLRU (patch dari repo Arkael)"
         type: boolean
         default: true
+      mglru_only_regex:
+        description: "HANYA terapkan commit yang subject-nya cocok regex ini (kosong = semua)"
+        required: false
+        default: "mm[:/_]|lru|multi-?gen|mglru|vmscan|workingset|memcg|young|swap"
       mglru_skip_regex:
         description: "Lewati commit di patch yang subject-nya cocok regex ini (bukan MGLRU)"
         required: false
@@ -65,6 +69,7 @@ jobs:
 
     steps:
       - name: Checkout source
+        timeout-minutes: 10
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.source_repo }}
@@ -117,6 +122,7 @@ jobs:
           rm -rf mg && mkdir mg
           git mailsplit -omg mglru.patch > /dev/null
           SKIP="${{ inputs.mglru_skip_regex }}"
+          ONLY="${{ inputs.mglru_only_regex }}"
           echo "=== Daftar commit di patch ==="
           for f in mg/*; do
             echo "$(basename $f): $(grep -m1 '^Subject:' $f)"
@@ -124,6 +130,10 @@ jobs:
           echo "=== Menerapkan ==="
           for f in mg/*; do
             SUBJ=$(grep -m1 '^Subject:' "$f")
+            if [ -n "$ONLY" ] && ! echo "$SUBJ" | grep -qiE "$ONLY"; then
+              echo "SKIP  (bukan MGLRU) $SUBJ"
+              continue
+            fi
             if [ -n "$SKIP" ] && echo "$SUBJ" | grep -qiE "$SKIP"; then
               echo "SKIP  $SUBJ"
               continue

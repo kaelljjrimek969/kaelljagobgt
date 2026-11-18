@@ -217,7 +217,7 @@ jobs:
           # OOM badness halving 50% (proses oom_score_adj <= 0 dibadness-kan setengah)
           patch("mm/oom_kill.c",
                 r"(\tadj \*= totalpages / 1000;\n\tpoints \+= adj;\n)",
-                r"\g<1>\tif (oom_score_adj <= 0)\n\t\tpoints /= 2;\n", "oom_halving")
+                r"\g<1>\tif (adj <= 0)\n\t\tpoints /= 2;\n", "oom_halving")
 
           # Proactive compaction: helper dipanggil governor kaelltzyy saat start
           try:
@@ -236,7 +236,7 @@ jobs:
           except Exception as e:
               print("::warning::compact helper gagal:", e)
           PY
-          grep -n "oom_score_adj <= 0" mm/oom_kill.c || true
+          grep -n "adj <= 0" mm/oom_kill.c || true
 
       - name: Tambah NTSYNC
         if: ${{ inputs.ntsync_enable }}

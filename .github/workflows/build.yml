@@ -21,6 +21,7 @@ on:
         default: "thin"
         options:
           - thin
+          - keep
           - full
           - none
       ksu_enable:
@@ -40,6 +41,8 @@ env:
   # KernelSU-Next: branch next = terbaru. Ganti ke tag stabil kalau next gagal build
   KSU_REPO: KernelSU-Next/KernelSU-Next
   KSU_BRANCH: next
+  # Kosong = tag stabil terbaru. Isi "next" kalau mau branch dev
+  KSU_REF: ""
   ANYKERNEL_REPO: https://github.com/osm0sis/AnyKernel3
   TZ: Asia/Jakarta
 
@@ -89,7 +92,7 @@ jobs:
         if: ${{ inputs.ksu_enable }}
         run: |
           test -d drivers || { echo "Bukan di root source kernel: $(pwd)"; ls -la; exit 1; }
-          curl -fLSs "https://raw.githubusercontent.com/${KSU_REPO}/${KSU_BRANCH}/kernel/setup.sh" | bash -s "${KSU_BRANCH}"
+          curl -fLSs "https://raw.githubusercontent.com/${KSU_REPO}/${KSU_BRANCH}/kernel/setup.sh" | bash -s ${KSU_REF}
           ls -la
 
       - name: Tambah governor Kaelltzyy
@@ -159,6 +162,11 @@ jobs:
       - name: Info versi kernel
         run: |
           make kernelversion
+          git log -3 --oneline || true
+          echo "--- BORE ---"
+          grep -rn "SCHED_BORE" init/Kconfig kernel/sched/Kconfig 2>/dev/null | head -3 || true
+          echo "--- BBR ---"
+          grep -n -i "bbrv3\|BBR v3" net/ipv4/tcp_bbr.c | head -3 || true
 
       - name: Build kernel
         run: |
@@ -173,14 +181,17 @@ jobs:
 
           # LTO
           case "${{ inputs.lto_mode }}" in
+            keep)
+              echo "LTO: ikut defconfig"
+              ;;
             thin)
-              scripts/config --file out/.config -d LTO_NONE -e LTO_CLANG -e THINLTO -d LTO_CLANG_FULL
+              scripts/config --file out/.config -d LTO_NONE -d LTO_CLANG_FULL -e LTO_CLANG_THIN
               ;;
             full)
-              scripts/config --file out/.config -d LTO_NONE -e LTO_CLANG -d THINLTO -e LTO_CLANG_FULL
+              scripts/config --file out/.config -d LTO_NONE -d LTO_CLANG_THIN -e LTO_CLANG_FULL
               ;;
             none)
-              scripts/config --file out/.config -e LTO_NONE -d LTO_CLANG -d THINLTO -d LTO_CLANG_FULL
+              scripts/config --file out/.config -e LTO_NONE -d LTO_CLANG_THIN -d LTO_CLANG_FULL
               ;;
           esac
 
@@ -192,7 +203,7 @@ jobs:
 
           # KernelSU-Next (hook pakai kprobe)
           if [ "${{ inputs.ksu_enable }}" = "true" ]; then
-            scripts/config --file out/.config -e KSU -e KPROBES -e KPROBE_EVENTS
+            scripts/config --file out/.config -e KSU -e KPROBES -e HAVE_KPROBES -e KPROBE_EVENTS
           fi
 
           # Nama kernel
@@ -200,17 +211,55 @@ jobs:
           scripts/config --file out/.config -d LOCALVERSION_AUTO
 
           make $MAKE_ARGS olddefconfig
-          make $MAKE_ARGS -j"$(nproc --all)" 2>&1 | tee build.log
+          make $MAKE_ARGS -j"$(nproc --all)" Image 2>&1 | tee build.log
 
           test -f out/arch/arm64/boot/Image || { echo "Build gagal: Image tidak ada"; exit 1; }
+
+      - name: Cek hasil build
+        run: |
+          ls -lh out/arch/arm64/boot/Image
+          strings out/arch/arm64/boot/Image | grep -m1 "Linux version" || true
+          grep -E '^CONFIG_(LOCALVERSION|LTO_CLANG|CFI_CLANG|MODVERSIONS|KSU|KPROBES|CPU_FREQ_DEFAULT_GOV)' out/.config || true
+          cp out/.config kaelltzyy.config
 
       - name: Package AnyKernel3
         run: |
           git clone --depth=1 "$ANYKERNEL_REPO" ak3
-          rm -rf ak3/.git ak3/modules ak3/patch ak3/ramdisk
+          rm -rf ak3/.git ak3/README.md
           cp out/arch/arm64/boot/Image ak3/Image
           DATE=$(date +%Y%m%d-%H%M)
           echo "ZIP_NAME=${KERNEL_NAME}-${DATE}" >> "$GITHUB_ENV"
+          # anykernel.sh sama seperti workflow lama yang berhasil boot:
+          # tanpa cek device, hanya ganti kernel (split_boot + flash_boot, ramdisk tidak dibongkar)
+          cat > ak3/anykernel.sh <<'AKEOF'
+          ### AnyKernel3 - KaelltzyyxPERF GKI 5.10 (tanpa cek device, kernel saja)
+          properties() { '
+          kernel.string=KaelltzyyxPERF
+          do.devicecheck=0
+          do.modules=0
+          do.systemless=0
+          do.cleanup=1
+          do.cleanuponabort=0
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; }
+
+          boot_attributes() {
+          set_perm_recursive 0 0 755 644 $RAMDISK/*;
+          set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
+          }
+
+          BLOCK=boot;
+          IS_SLOT_DEVICE=auto;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+
+          . tools/ak3-core.sh;
+
+          split_boot;
+          flash_boot;
+          AKEOF
           cd ak3
           zip -r9 "../${KERNEL_NAME}-${DATE}.zip" . -x "*.git*"
 
@@ -225,4 +274,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-log
-          path: build.log
+          path: |
+            build.log
+            kaelltzyy.config

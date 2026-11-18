@@ -210,12 +210,6 @@ jobs:
           patch("fs/dcache.c", r"(sysctl_vfs_cache_pressure\s+__read_mostly\s*=\s*)\d+;", r"\g<1>50;", "vfs_cache_pressure")
           # Swappiness default 20
           patch("mm/vmscan.c", r"int vm_swappiness = \d+;", "int vm_swappiness = 20;", "swappiness_default")
-          # Swappiness cap max 20 (batas sysctl)
-          patch("kernel/sysctl.c",
-                r'(\.procname\s*=\s*"swappiness".*?\.extra2\s*=\s*)[^,}]+',
-                r"\g<1>&kaell_swappiness_max", "swappiness_cap")
-          patch("kernel/sysctl.c", r"(#include <linux/sysctl\.h>\n)",
-                r"\g<1>\nstatic int kaell_swappiness_max = 20;", "swappiness_cap_var")
           # Min free kbytes +5 MB
           patch("mm/page_alloc.c",
                 r"(new_min_free_kbytes\s*=\s*int_sqrt\(lowmem_kbytes\s*\*\s*16\);)",
@@ -242,7 +236,6 @@ jobs:
           except Exception as e:
               print("::warning::compact helper gagal:", e)
           PY
-          grep -n "kaell_swappiness_max" kernel/sysctl.c || true
           grep -n "oom_score_adj <= 0" mm/oom_kill.c || true
 
       - name: Tambah NTSYNC

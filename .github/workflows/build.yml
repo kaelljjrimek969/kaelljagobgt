@@ -32,6 +32,14 @@ on:
         description: "Jadikan governor kaelltzyy sebagai default"
         type: boolean
         default: false
+      mglru_enable:
+        description: "Tambah MGLRU (patch dari repo Arkael)"
+        type: boolean
+        default: true
+      mglru_patch_url:
+        description: "URL patch MGLRU (format .patch)"
+        required: true
+        default: "https://github.com/Arkael-Dev/arkael-kernel-a12-5.10/compare/mglru-5.10.patch"
 
 env:
   KERNEL_NAME: kaelljagobgt
@@ -94,6 +102,23 @@ jobs:
           test -d drivers || { echo "Bukan di root source kernel: $(pwd)"; ls -la; exit 1; }
           curl -fLSs "https://raw.githubusercontent.com/${KSU_REPO}/${KSU_BRANCH}/kernel/setup.sh" | bash -s ${KSU_REF}
           ls -la
+
+      - name: Tambah MGLRU
+        if: ${{ inputs.mglru_enable }}
+        run: |
+          git config user.name "kaell"
+          git config user.email "kaell@users.noreply.github.com"
+          curl -fLSs "${{ inputs.mglru_patch_url }}" -o mglru.patch
+          ls -lh mglru.patch
+          grep -c '^From ' mglru.patch || true
+          if git am --3way mglru.patch; then
+            echo "MGLRU: patch terpasang"
+          else
+            git am --abort || true
+            echo "::error::Patch MGLRU gagal diterapkan ke branch ${{ inputs.source_ref }}"
+            exit 1
+          fi
+          grep -n "LRU_GEN" mm/Kconfig | head -5
 
       - name: Tambah governor Kaelltzyy
         run: |
@@ -172,8 +197,8 @@ jobs:
         run: |
           export PATH="$HOME/neutron/bin:$PATH"
           export CCACHE_DIR="$HOME/.ccache"
-          export KBUILD_BUILD_USER="kaell"
-          export KBUILD_BUILD_HOST="github-actions"
+          export KBUILD_BUILD_USER="Kaelltzyy"
+          export KBUILD_BUILD_HOST="PERF"
 
           MAKE_ARGS="ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- CC=clang"
 
@@ -201,6 +226,11 @@ jobs:
             scripts/config --file out/.config -d CPU_FREQ_DEFAULT_GOV_SCHEDUTIL -e CPU_FREQ_DEFAULT_GOV_KAELLTZYY
           fi
 
+          # MGLRU
+          if [ "${{ inputs.mglru_enable }}" = "true" ]; then
+            scripts/config --file out/.config -e LRU_GEN -e LRU_GEN_ENABLED -d LRU_GEN_STATS
+          fi
+
           # KernelSU-Next (hook pakai kprobe)
           if [ "${{ inputs.ksu_enable }}" = "true" ]; then
             scripts/config --file out/.config -e KSU -e KPROBES -e HAVE_KPROBES -e KPROBE_EVENTS
@@ -211,6 +241,9 @@ jobs:
           scripts/config --file out/.config -d LOCALVERSION_AUTO
 
           make $MAKE_ARGS olddefconfig
+          if [ "${{ inputs.mglru_enable }}" = "true" ]; then
+            grep -E '^CONFIG_LRU_GEN' out/.config || { echo "::error::LRU_GEN hilang setelah olddefconfig (dependensi arch tidak terpenuhi)"; exit 1; }
+          fi
           make $MAKE_ARGS -j"$(nproc --all)" Image 2>&1 | tee build.log
 
           test -f out/arch/arm64/boot/Image || { echo "Build gagal: Image tidak ada"; exit 1; }
@@ -219,7 +252,7 @@ jobs:
         run: |
           ls -lh out/arch/arm64/boot/Image
           strings out/arch/arm64/boot/Image | grep -m1 "Linux version" || true
-          grep -E '^CONFIG_(LOCALVERSION|LTO_CLANG|CFI_CLANG|MODVERSIONS|KSU|KPROBES|CPU_FREQ_DEFAULT_GOV)' out/.config || true
+          grep -E '^CONFIG_(LOCALVERSION|LTO_CLANG|CFI_CLANG|MODVERSIONS|LRU_GEN|KSU|KPROBES|CPU_FREQ_DEFAULT_GOV)' out/.config || true
           cp out/.config kaelltzyy.config
 
       - name: Package AnyKernel3

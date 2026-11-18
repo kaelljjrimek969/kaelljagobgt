@@ -16,7 +16,7 @@ on:
           - full
           - none
       ksu_enable:
-        description: "Integrasi KernelSU"
+        description: "Integrasi KernelSU-Next"
         type: boolean
         default: true
       kaelltzyy_default:
@@ -29,9 +29,9 @@ env:
   # Nama yang tampil di HP (uname -r)
   KERNEL_LOCALVERSION: KaelltzyyxPERF
   ARCH: arm64
-  # KernelSU (tiann): ganti branch ke tag (mis. v0.9.5) kalau main gagal build
-  KSU_REPO: tiann/KernelSU
-  KSU_BRANCH: main
+  # KernelSU-Next: branch next = terbaru. Ganti ke tag stabil kalau next gagal build
+  KSU_REPO: KernelSU-Next/KernelSU-Next
+  KSU_BRANCH: next
   ANYKERNEL_REPO: https://github.com/osm0sis/AnyKernel3
   TZ: Asia/Jakarta
 
@@ -75,10 +75,11 @@ jobs:
           echo "$HOME/neutron/bin" >> "$GITHUB_PATH"
           "$HOME/neutron/bin/clang" --version | head -n1
 
-      - name: Integrasi KernelSU
+      - name: Integrasi KernelSU-Next
         if: ${{ inputs.ksu_enable }}
         run: |
-          curl -LSs "https://raw.githubusercontent.com/${KSU_REPO}/${KSU_BRANCH}/kernel/setup.sh" | bash -s "${KSU_BRANCH}"
+          curl -fLS "https://raw.githubusercontent.com/${KSU_REPO}/${KSU_BRANCH}/kernel/setup.sh" -o /tmp/ksu_setup.sh
+          bash /tmp/ksu_setup.sh "${KSU_BRANCH}"
           ls -la
 
       - name: Tambah governor Kaelltzyy
@@ -179,9 +180,9 @@ jobs:
             scripts/config --file out/.config -d CPU_FREQ_DEFAULT_GOV_SCHEDUTIL -e CPU_FREQ_DEFAULT_GOV_KAELLTZYY
           fi
 
-          # KernelSU
+          # KernelSU-Next (hook pakai kprobe)
           if [ "${{ inputs.ksu_enable }}" = "true" ]; then
-            scripts/config --file out/.config -e KSU
+            scripts/config --file out/.config -e KSU -e KPROBES -e KPROBE_EVENTS
           fi
 
           # Nama kernel
@@ -215,4 +216,3 @@ jobs:
         with:
           name: build-log
           path: build.log
-          

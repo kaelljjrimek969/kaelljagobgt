@@ -3,6 +3,14 @@ name: Build kaelljagobgt
 on:
   workflow_dispatch:
     inputs:
+      source_repo:
+        description: "Repo source kernel (owner/nama)"
+        required: true
+        default: "Arkael-Dev/arkael-kernel-a12-5.10"
+      source_ref:
+        description: "Branch source kernel"
+        required: true
+        default: "bore-bbrv3-5.10"
       defconfig:
         description: "Defconfig (isi sesuai source, mis. gki_defconfig)"
         required: true
@@ -44,6 +52,8 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
         with:
+          repository: ${{ inputs.source_repo }}
+          ref: ${{ inputs.source_ref }}
           fetch-depth: 1
           submodules: recursive
 
@@ -78,7 +88,7 @@ jobs:
       - name: Integrasi KernelSU-Next
         if: ${{ inputs.ksu_enable }}
         run: |
-          test -d drivers || { echo "Bukan di root source kernel: $(pwd)"; ls; exit 1; }
+          test -d drivers || { echo "Bukan di root source kernel: $(pwd)"; ls -la; exit 1; }
           curl -fLSs "https://raw.githubusercontent.com/${KSU_REPO}/${KSU_BRANCH}/kernel/setup.sh" | bash -s "${KSU_BRANCH}"
           ls -la
 

@@ -32,14 +32,6 @@ on:
         description: "Jadikan governor kaelltzyy sebagai default"
         type: boolean
         default: false
-      ntsync_enable:
-        description: "Aktifkan NTSYNC (/dev/ntsync untuk Wine/Proton)"
-        type: boolean
-        default: true
-      ntsync_patch_url:
-        description: "URL patch backport ntsync 5.10 (.patch/.diff, opsional; kosongkan kalau source sudah punya ntsync)"
-        required: false
-        default: ""
 
 env:
   KERNEL_NAME: kaelljagobgt
@@ -238,42 +230,6 @@ jobs:
           PY
           grep -n "adj <= 0" mm/oom_kill.c || true
 
-      - name: Tambah NTSYNC
-        if: ${{ inputs.ntsync_enable }}
-        env:
-          NTSYNC_PATCH_URL: ${{ inputs.ntsync_patch_url }}
-        run: |
-          # NTSYNC resmi masuk upstream di Linux 6.14, jadi 5.10 butuh backport.
-          if [ -n "$NTSYNC_PATCH_URL" ]; then
-            echo "Apply patch ntsync dari: $NTSYNC_PATCH_URL"
-            curl -fLSs "$NTSYNC_PATCH_URL" -o ntsync.patch
-            patch -p1 --no-backup-if-mismatch < ntsync.patch
-          fi
-
-          if [ -f drivers/misc/ntsync.c ] && [ -f include/uapi/linux/ntsync.h ]; then
-            echo "ntsync.c ada di source"
-            # Pastikan Kconfig & Makefile punya entry NTSYNC
-            if ! grep -q "config NTSYNC" drivers/misc/Kconfig; then
-              python3 - <<'PY'
-          p = "drivers/misc/Kconfig"
-          s = open(p).read()
-          ent = ("config NTSYNC\n"
-                 "\ttristate \"NT synchronization primitive emulation\"\n"
-                 "\thelp\n"
-                 "\t  Driver /dev/ntsync untuk emulasi primitif sinkronisasi NT (Wine).\n\n")
-          i = s.rfind("endmenu")
-          assert i != -1, "endmenu tidak ketemu di drivers/misc/Kconfig"
-          open(p, "w").write(s[:i] + ent + s[i:])
-          PY
-            fi
-            grep -q "ntsync" drivers/misc/Makefile || echo 'obj-$(CONFIG_NTSYNC)	+= ntsync.o' >> drivers/misc/Makefile
-            grep -n -i ntsync drivers/misc/Kconfig drivers/misc/Makefile
-            echo "NTSYNC_READY=1" >> "$GITHUB_ENV"
-          else
-            echo "::warning::drivers/misc/ntsync.c tidak ada & tidak ada patch. NTSYNC dilewati. Isi ntsync_patch_url dengan backport 5.10."
-            echo "NTSYNC_READY=0" >> "$GITHUB_ENV"
-          fi
-
       - name: Info versi kernel
         run: |
           make kernelversion
@@ -324,21 +280,18 @@ jobs:
           # Timer frequency 1000 Hz
           scripts/config --file out/.config -d HZ_100 -d HZ_250 -d HZ_300 -e HZ_1000 --set-val HZ 1000
 
-          # Matikan debug (kurangi overhead)
-          scripts/config --file out/.config -d SCHED_DEBUG -d SCHEDSTATS -d DEBUG_PREEMPT \
-            -d LOCKDEP -d DEBUG_LOCK_ALLOC -d SLUB_DEBUG -d SLUB_DEBUG_ON -d PM_DEBUG
-
           # Uclamp (boost task game dari user-space)
           scripts/config --file out/.config -e UCLAMP_TASK -e UCLAMP_TASK_GROUP
+
+          # Matikan power efficient workqueue
+          scripts/config --file out/.config -d WQ_POWER_EFFICIENT_DEFAULT
+
+          # RCU priority boost (butuh RCU_EXPERT)
+          scripts/config --file out/.config -e RCU_EXPERT -e RCU_BOOST --set-val RCU_BOOST_DELAY 500
 
           # Optimasi -O3 (kalau symbol ada di source; KCFLAGS di bawah jadi fallback)
           if grep -q "CC_OPTIMIZE_FOR_PERFORMANCE_O3" init/Kconfig; then
             scripts/config --file out/.config -d CC_OPTIMIZE_FOR_PERFORMANCE -e CC_OPTIMIZE_FOR_PERFORMANCE_O3
-          fi
-
-          # NTSYNC (built-in supaya tidak perlu modul)
-          if [ "${NTSYNC_READY:-0}" = "1" ]; then
-            scripts/config --file out/.config -e NTSYNC
           fi
 
           # KernelSU-Next (hook pakai kprobe)
@@ -359,7 +312,7 @@ jobs:
         run: |
           ls -lh out/arch/arm64/boot/Image
           strings out/arch/arm64/boot/Image | grep -m1 "Linux version" || true
-          grep -E '^CONFIG_(HZ|SCHED_DEBUG|SCHEDSTATS|UCLAMP|CC_OPTIMIZE|LOCALVERSION|LTO_CLANG|CFI_CLANG|MODVERSIONS|KSU|KPROBES|NTSYNC|ZRAM|CPU_FREQ_DEFAULT_GOV)' out/.config || true
+          grep -E '^CONFIG_(HZ|SCHED_DEBUG|SCHEDSTATS|UCLAMP|CC_OPTIMIZE|LOCALVERSION|LTO_CLANG|CFI_CLANG|MODVERSIONS|KSU|KPROBES|WQ_POWER_EFFICIENT|RCU_BOOST|RCU_EXPERT|ZRAM|CPU_FREQ_DEFAULT_GOV)' out/.config || true
           cp out/.config kaelltzyy.config
 
       - name: Package AnyKernel3

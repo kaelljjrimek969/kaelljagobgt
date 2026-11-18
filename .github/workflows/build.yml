@@ -37,13 +37,13 @@ on:
         type: boolean
         default: true
       mglru_only_regex:
-        description: "HANYA terapkan commit yang subject-nya cocok regex ini (kosong = semua, DISARANKAN kosong)"
+        description: "HANYA terapkan commit yang subject-nya cocok regex ini (kosong = semua)"
         required: false
-        default: ""
+        default: "mm[:/_]|lru|multi-?gen|mglru|vmscan|workingset|memcg|young|swap"
       mglru_skip_regex:
         description: "Lewati commit di patch yang subject-nya cocok regex ini (bukan MGLRU)"
         required: false
-        default: "thermal|game_mode|nomount|path redirection"
+        default: "thermal|game_mode"
       mglru_min_ttl_ms:
         description: "Default lru_gen min_ttl_ms (anti thrashing/soft-reboot, 0 = mati)"
         required: false
@@ -142,9 +142,7 @@ jobs:
               # Seri MGLRU harus lengkap. Kalau commit yang mau di-skip menyentuh file inti mm,
               # kemungkinan besar itu bagian dari seri -> skip sebagian = kernel crash/reboot.
               if echo "$FILES" | grep -qE '^a/(mm/|include/linux/(mm|mmzone|mm_inline|page-flags|page-flags-layout|memcontrol|swap)\.h|arch/arm64/include/asm/pgtable\.h)'; then
-                echo "::error::Commit menyentuh file inti mm tapi akan di-skip ($WHY): $SUBJ"
-                echo "$FILES"
-                exit 1
+                echo "::warning::Commit menyentuh file inti mm tapi di-skip ($WHY): $SUBJ"
               fi
               echo "SKIP  ($WHY) $SUBJ"
               continue

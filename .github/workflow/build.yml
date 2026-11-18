@@ -1,0 +1,218 @@
+name: Build kaelljagobgt
+
+on:
+  workflow_dispatch:
+    inputs:
+      defconfig:
+        description: "Defconfig (isi sesuai source, mis. gki_defconfig)"
+        required: true
+        default: "gki_defconfig"
+      lto_mode:
+        description: "LTO mode"
+        type: choice
+        default: "thin"
+        options:
+          - thin
+          - full
+          - none
+      ksu_enable:
+        description: "Integrasi KernelSU"
+        type: boolean
+        default: true
+      kaelltzyy_default:
+        description: "Jadikan governor kaelltzyy sebagai default"
+        type: boolean
+        default: false
+
+env:
+  KERNEL_NAME: kaelljagobgt
+  # Nama yang tampil di HP (uname -r)
+  KERNEL_LOCALVERSION: KaelltzyyxPERF
+  ARCH: arm64
+  # KernelSU (tiann): ganti branch ke tag (mis. v0.9.5) kalau main gagal build
+  KSU_REPO: tiann/KernelSU
+  KSU_BRANCH: main
+  ANYKERNEL_REPO: https://github.com/osm0sis/AnyKernel3
+  TZ: Asia/Jakarta
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Maksimalkan ruang disk + swap
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo swapoff -a || true
+          sudo rm -f /swapfile
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          df -h /
+          free -h
+
+      - name: Install dependensi
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache curl flex git libelf-dev libssl-dev \
+            libncurses-dev lz4 python3 rsync unzip zip xz-utils zstd cpio \
+            libarchive-tools device-tree-compiler
+
+      - name: Download Neutron clang
+        run: |
+          mkdir -p "$HOME/neutron"
+          cd "$HOME/neutron"
+          bash <(curl -s https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman) -S
+          echo "$HOME/neutron/bin" >> "$GITHUB_PATH"
+          "$HOME/neutron/bin/clang" --version | head -n1
+
+      - name: Integrasi KernelSU
+        if: ${{ inputs.ksu_enable }}
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/${KSU_REPO}/${KSU_BRANCH}/kernel/setup.sh" | bash -s "${KSU_BRANCH}"
+          ls -la
+
+      - name: Tambah governor Kaelltzyy
+        run: |
+          cat > drivers/cpufreq/cpufreq_kaelltzyy.c <<'EOF'
+          // SPDX-License-Identifier: GPL-2.0-only
+          /*
+           * Governor Kaelltzyy (fork dari governor performance)
+           */
+          #include <linux/cpufreq.h>
+          #include <linux/init.h>
+          #include <linux/module.h>
+
+          static void cpufreq_gov_kaelltzyy_limits(struct cpufreq_policy *policy)
+          {
+              pr_debug("kaelltzyy: setting to %u kHz\n", policy->max);
+              __cpufreq_driver_target(policy, policy->max, CPUFREQ_RELATION_H);
+          }
+
+          static struct cpufreq_governor cpufreq_gov_kaelltzyy = {
+              .name   = "kaelltzyy",
+              .owner  = THIS_MODULE,
+              .flags  = CPUFREQ_GOV_STRICT_TARGET,
+              .limits = cpufreq_gov_kaelltzyy_limits,
+          };
+
+          #ifdef CONFIG_CPU_FREQ_DEFAULT_GOV_KAELLTZYY
+          struct cpufreq_governor *cpufreq_default_governor(void)
+          {
+              return &cpufreq_gov_kaelltzyy;
+          }
+          #endif
+
+          MODULE_AUTHOR("Kaell");
+          MODULE_DESCRIPTION("CPUfreq policy governor 'kaelltzyy'");
+          MODULE_LICENSE("GPL");
+
+          cpufreq_governor_init(cpufreq_gov_kaelltzyy);
+          cpufreq_governor_exit(cpufreq_gov_kaelltzyy);
+          EOF
+
+          # Makefile
+          sed -i '/cpufreq_performance.o/a obj-$(CONFIG_CPU_FREQ_GOV_KAELLTZYY)\t+= cpufreq_kaelltzyy.o' drivers/cpufreq/Makefile
+          grep -n kaelltzyy drivers/cpufreq/Makefile
+
+          # Kconfig
+          python3 - <<'PY'
+          p = "drivers/cpufreq/Kconfig"
+          s = open(p).read()
+          gov = ("config CPU_FREQ_GOV_KAELLTZYY\n"
+                 "\ttristate \"'kaelltzyy' governor\"\n"
+                 "\thelp\n"
+                 "\t  Governor Kaelltzyy, fork dari governor performance.\n\n")
+          dflt = ("config CPU_FREQ_DEFAULT_GOV_KAELLTZYY\n"
+                  "\tbool \"kaelltzyy\"\n"
+                  "\tselect CPU_FREQ_GOV_KAELLTZYY\n"
+                  "\thelp\n"
+                  "\t  Pakai governor 'kaelltzyy' sebagai default.\n\n")
+          a = "config CPU_FREQ_GOV_PERFORMANCE\n"
+          b = "config CPU_FREQ_DEFAULT_GOV_PERFORMANCE\n"
+          assert a in s and b in s, "marker Kconfig tidak ketemu"
+          s = s.replace(a, gov + a, 1).replace(b, dflt + b, 1)
+          open(p, "w").write(s)
+          PY
+          grep -n -i kaelltzyy drivers/cpufreq/Kconfig
+
+      - name: Info versi kernel
+        run: |
+          make kernelversion
+
+      - name: Build kernel
+        run: |
+          export PATH="$HOME/neutron/bin:$PATH"
+          export CCACHE_DIR="$HOME/.ccache"
+          export KBUILD_BUILD_USER="kaell"
+          export KBUILD_BUILD_HOST="github-actions"
+
+          MAKE_ARGS="ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- CC=clang"
+
+          make $MAKE_ARGS ${{ inputs.defconfig }}
+
+          # LTO
+          case "${{ inputs.lto_mode }}" in
+            thin)
+              scripts/config --file out/.config -d LTO_NONE -e LTO_CLANG -e THINLTO -d LTO_CLANG_FULL
+              ;;
+            full)
+              scripts/config --file out/.config -d LTO_NONE -e LTO_CLANG -d THINLTO -e LTO_CLANG_FULL
+              ;;
+            none)
+              scripts/config --file out/.config -e LTO_NONE -d LTO_CLANG -d THINLTO -d LTO_CLANG_FULL
+              ;;
+          esac
+
+          # Governor Kaelltzyy
+          scripts/config --file out/.config -e CPU_FREQ_GOV_KAELLTZYY
+          if [ "${{ inputs.kaelltzyy_default }}" = "true" ]; then
+            scripts/config --file out/.config -d CPU_FREQ_DEFAULT_GOV_SCHEDUTIL -e CPU_FREQ_DEFAULT_GOV_KAELLTZYY
+          fi
+
+          # KernelSU
+          if [ "${{ inputs.ksu_enable }}" = "true" ]; then
+            scripts/config --file out/.config -e KSU
+          fi
+
+          # Nama kernel
+          scripts/config --file out/.config --set-str LOCALVERSION "-${KERNEL_LOCALVERSION}"
+          scripts/config --file out/.config -d LOCALVERSION_AUTO
+
+          make $MAKE_ARGS olddefconfig
+          make $MAKE_ARGS -j"$(nproc --all)" 2>&1 | tee build.log
+
+          test -f out/arch/arm64/boot/Image || { echo "Build gagal: Image tidak ada"; exit 1; }
+
+      - name: Package AnyKernel3
+        run: |
+          git clone --depth=1 "$ANYKERNEL_REPO" ak3
+          rm -rf ak3/.git ak3/modules ak3/patch ak3/ramdisk
+          cp out/arch/arm64/boot/Image ak3/Image
+          DATE=$(date +%Y%m%d-%H%M)
+          echo "ZIP_NAME=${KERNEL_NAME}-${DATE}" >> "$GITHUB_ENV"
+          cd ak3
+          zip -r9 "../${KERNEL_NAME}-${DATE}.zip" . -x "*.git*"
+
+      - name: Upload zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_NAME }}.zip
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          

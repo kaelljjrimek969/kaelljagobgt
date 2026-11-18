@@ -32,26 +32,26 @@ on:
         description: "Jadikan governor kaelltzyy sebagai default"
         type: boolean
         default: false
-      mglru_enable:
-        description: "Tambah MGLRU (patch dari repo Arkael)"
+      gaming_tweaks:
+        description: "Tweak gaming (O3, BBR default, kurangi debug) + modul runtime KSU"
         type: boolean
         default: true
-      mglru_only_regex:
-        description: "HANYA terapkan commit yang subject-nya cocok regex ini (kosong = semua)"
+      hz_mode:
+        description: "Tick rate HZ (1000 = paling responsif tapi boros baterai; keep = aman)"
+        type: choice
+        default: "keep"
+        options:
+          - keep
+          - "300"
+          - "1000"
+      ntsync_enable:
+        description: "Aktifkan NTSync (/dev/ntsync untuk Wine/Proton/Winlator)"
+        type: boolean
+        default: true
+      ntsync_patch_url:
+        description: "URL patch backport NTSync 5.10 (kosong = pakai yang sudah ada di source)"
         required: false
-        default: "mm[:/_]|lru|multi-?gen|mglru|vmscan|workingset|memcg|young|swap"
-      mglru_skip_regex:
-        description: "Lewati commit di patch yang subject-nya cocok regex ini (bukan MGLRU)"
-        required: false
-        default: "thermal|game_mode"
-      mglru_min_ttl_ms:
-        description: "Default lru_gen min_ttl_ms (anti thrashing/soft-reboot, 0 = mati)"
-        required: false
-        default: "1000"
-      mglru_patch_url:
-        description: "URL patch MGLRU (format .patch)"
-        required: true
-        default: "https://github.com/Arkael-Dev/arkael-kernel-a12-5.10/compare/mglru-5.10.patch"
+        default: ""
 
 env:
   KERNEL_NAME: kaelljagobgt
@@ -73,7 +73,6 @@ jobs:
 
     steps:
       - name: Checkout source
-        timeout-minutes: 10
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.source_repo }}
@@ -116,59 +115,25 @@ jobs:
           curl -fLSs "https://raw.githubusercontent.com/${KSU_REPO}/${KSU_BRANCH}/kernel/setup.sh" | bash -s ${KSU_REF}
           ls -la
 
-      - name: Tambah MGLRU
-        if: ${{ inputs.mglru_enable }}
+      - name: Integrasi NTSync
+        if: ${{ inputs.ntsync_enable }}
+        env:
+          NTSYNC_PATCH_URL: ${{ inputs.ntsync_patch_url }}
         run: |
-          git config user.name "kaell"
-          git config user.email "kaell@users.noreply.github.com"
-          curl -fLSs "${{ inputs.mglru_patch_url }}" -o mglru.patch
-          ls -lh mglru.patch
-          rm -rf mg && mkdir mg
-          git mailsplit -omg mglru.patch > /dev/null
-          SKIP="${{ inputs.mglru_skip_regex }}"
-          ONLY="${{ inputs.mglru_only_regex }}"
-          echo "=== Daftar commit di patch ==="
-          for f in mg/*; do
-            echo "$(basename $f): $(grep -m1 '^Subject:' $f)"
-          done
-          echo "=== Menerapkan ==="
-          for f in mg/*; do
-            SUBJ=$(grep -m1 '^Subject:' "$f")
-            WHY=""
-            if [ -n "$ONLY" ] && ! echo "$SUBJ" | grep -qiE "$ONLY"; then WHY="bukan MGLRU"; fi
-            if [ -n "$SKIP" ] && echo "$SUBJ" | grep -qiE "$SKIP"; then WHY="skip regex"; fi
-            if [ -n "$WHY" ]; then
-              FILES=$(grep -E '^diff --git' "$f" | awk '{print $3}')
-              # Seri MGLRU harus lengkap. Kalau commit yang mau di-skip menyentuh file inti mm,
-              # kemungkinan besar itu bagian dari seri -> skip sebagian = kernel crash/reboot.
-              if echo "$FILES" | grep -qE '^a/(mm/|include/linux/(mm|mmzone|mm_inline|page-flags|page-flags-layout|memcontrol|swap)\.h|arch/arm64/include/asm/pgtable\.h)'; then
-                echo "::warning::Commit menyentuh file inti mm tapi di-skip ($WHY): $SUBJ"
-              fi
-              echo "SKIP  ($WHY) $SUBJ"
-              continue
-            fi
-            if git am "$f" >/dev/null 2>&1 || { git am --abort >/dev/null 2>&1; git am --3way "$f" >/dev/null 2>&1; }; then
-              echo "OK    $SUBJ"
-            else
-              git am --show-current-patch=diff 2>/dev/null | head -40 || true
-              git am --abort >/dev/null 2>&1 || true
-              echo "::error::GAGAL: $SUBJ"
-              exit 1
-            fi
-          done
-          grep -n "LRU_GEN" mm/Kconfig | head -5
-
-      - name: MGLRU min_ttl default (anti thrashing)
-        if: ${{ inputs.mglru_enable && inputs.mglru_min_ttl_ms != '0' }}
-        run: |
-          TTL="${{ inputs.mglru_min_ttl_ms }}"
-          grep -n "lru_gen_min_ttl" mm/vmscan.c | head -10 || true
-          if grep -qE '^(static )?unsigned long lru_gen_min_ttl( __read_mostly)?;' mm/vmscan.c \
-             && grep -q "lru_gen_min_ttl = msecs_to_jiffies" mm/vmscan.c; then
-            sed -i -E "s/^((static )?unsigned long lru_gen_min_ttl)( __read_mostly)?;/\1\3 = (${TTL}UL * HZ \/ 1000);/" mm/vmscan.c
-            grep -n "lru_gen_min_ttl" mm/vmscan.c | head -3
+          if [ -f drivers/misc/ntsync.c ]; then
+            echo "NTSync sudah ada di source, tidak perlu patch."
+          elif [ -n "$NTSYNC_PATCH_URL" ]; then
+            curl -fLSs "$NTSYNC_PATCH_URL" -o ntsync.patch
+            git apply --check -p1 ntsync.patch || { echo "Patch NTSync tidak cocok dengan source ini"; exit 1; }
+            git apply -p1 ntsync.patch
+            echo "Patch NTSync diterapkan."
           else
-            echo "::warning::lru_gen_min_ttl tidak ditemukan / formatnya beda, default tidak diubah. Set manual: echo ${TTL} > /sys/kernel/mm/lru_gen/min_ttl_ms"
+            echo "::warning::Source tidak punya NTSync dan ntsync_patch_url kosong. NTSync dilewati."
+          fi
+          # Beberapa versi Kconfig menandai NTSync BROKEN; lepaskan supaya bisa dipilih
+          if [ -f drivers/misc/Kconfig ] && grep -q "config NTSYNC" drivers/misc/Kconfig; then
+            sed -i '/config NTSYNC/,/^config /{/depends on BROKEN/d}' drivers/misc/Kconfig
+            grep -n -A6 "config NTSYNC" drivers/misc/Kconfig
           fi
 
       - name: Tambah governor Kaelltzyy
@@ -235,6 +200,31 @@ jobs:
           PY
           grep -n -i kaelltzyy drivers/cpufreq/Kconfig
 
+      - name: Default VM + zram (patch source)
+        if: ${{ inputs.gaming_tweaks }}
+        run: |
+          patch_val() { # file, regex-lama, pengganti
+            if grep -qE "$2" "$1"; then
+              sed -i -E "s|$2|$3|" "$1"
+              echo "OK   $1: $3"
+            else
+              echo "::warning::Pola tidak ketemu di $1: $2 (dilewati)"
+            fi
+          }
+          # Dirty ratio 10%, background 5%, writeback 3s, expire 5s
+          patch_val mm/page-writeback.c '^int vm_dirty_ratio = [0-9]+;'                'int vm_dirty_ratio = 10;'
+          patch_val mm/page-writeback.c '^int dirty_background_ratio = [0-9]+;'        'int dirty_background_ratio = 5;'
+          patch_val mm/page-writeback.c '^unsigned int dirty_writeback_interval = .*;'  'unsigned int dirty_writeback_interval = 3 * 100;'
+          patch_val mm/page-writeback.c '^unsigned int dirty_expire_interval = .*;'     'unsigned int dirty_expire_interval = 5 * 100;'
+          # VFS cache pressure 50
+          patch_val fs/dcache.c '^int sysctl_vfs_cache_pressure __read_mostly = [0-9]+;' 'int sysctl_vfs_cache_pressure __read_mostly = 50;'
+          # Swappiness max 20
+          patch_val mm/vmscan.c '^int vm_swappiness = [0-9]+;' 'int vm_swappiness = 20;'
+          # zram: kompresi default lz4 (fallback kalau tidak ada opsi Kconfig-nya)
+          if ! grep -q "ZRAM_DEF_COMP_LZ4" drivers/block/zram/Kconfig 2>/dev/null; then
+            patch_val drivers/block/zram/zram_drv.c 'default_compressor = "[a-z0-9-]+"' 'default_compressor = "lz4"'
+          fi
+
       - name: Info versi kernel
         run: |
           make kernelversion
@@ -248,8 +238,8 @@ jobs:
         run: |
           export PATH="$HOME/neutron/bin:$PATH"
           export CCACHE_DIR="$HOME/.ccache"
-          export KBUILD_BUILD_USER="Kaelltzyy"
-          export KBUILD_BUILD_HOST="PERF"
+          export KBUILD_BUILD_USER="kaell"
+          export KBUILD_BUILD_HOST="github-actions"
 
           MAKE_ARGS="ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- CC=clang"
 
@@ -277,14 +267,58 @@ jobs:
             scripts/config --file out/.config -d CPU_FREQ_DEFAULT_GOV_SCHEDUTIL -e CPU_FREQ_DEFAULT_GOV_KAELLTZYY
           fi
 
-          # MGLRU
-          if [ "${{ inputs.mglru_enable }}" = "true" ]; then
-            scripts/config --file out/.config -e LRU_GEN -e LRU_GEN_ENABLED -d LRU_GEN_STATS -e PSI -e MEMCG
-          fi
-
           # KernelSU-Next (hook pakai kprobe)
           if [ "${{ inputs.ksu_enable }}" = "true" ]; then
             scripts/config --file out/.config -e KSU -e KPROBES -e HAVE_KPROBES -e KPROBE_EVENTS
+          fi
+
+          # Tweak gaming (level config, aman untuk kompatibilitas modul vendor)
+          if [ "${{ inputs.gaming_tweaks }}" = "true" ]; then
+            # Optimasi compiler -O3 (hanya kalau source mendukung)
+            if grep -q "CC_OPTIMIZE_FOR_PERFORMANCE_O3" init/Kconfig; then
+              scripts/config --file out/.config -d CC_OPTIMIZE_FOR_PERFORMANCE -e CC_OPTIMIZE_FOR_PERFORMANCE_O3
+            fi
+            # TCP BBR sebagai default (ping online game lebih stabil)
+            scripts/config --file out/.config -e TCP_CONG_BBR -e DEFAULT_BBR \
+              -d DEFAULT_CUBIC -d DEFAULT_RENO --set-str DEFAULT_TCP_CONG bbr
+            # Matikan debug yang tidak mengubah layout struct (aman untuk modul vendor)
+            scripts/config --file out/.config -d DEBUG_PREEMPT -d PM_DEBUG -d PM_ADVANCED_DEBUG
+            # zram default lz4
+            if grep -q "ZRAM_DEF_COMP_LZ4" drivers/block/zram/Kconfig 2>/dev/null; then
+              scripts/config --file out/.config -d ZRAM_DEF_COMP_LZORLE -d ZRAM_DEF_COMP_ZSTD \
+                -e ZRAM_DEF_COMP_LZ4 --set-str ZRAM_DEF_COMP lz4
+            fi
+            scripts/config --file out/.config -e CRYPTO_LZ4 -e LZ4_COMPRESS -e LZ4_DECOMPRESS
+            # Low-latency TCP & input
+            scripts/config --file out/.config -e TCP_CONG_ADVANCED -e NET_SCH_FQ -e NET_SCH_FQ_CODEL
+          fi
+
+          # Tick rate (opsional, default keep)
+          case "${{ inputs.hz_mode }}" in
+            300|1000)
+              H="${{ inputs.hz_mode }}"
+              scripts/config --file out/.config -d HZ_100 -d HZ_250 -d HZ_300 -d HZ_1000 \
+                -e HZ_$H --set-val HZ $H
+              ;;
+          esac
+
+          # Touch/input boost (hanya kalau source punya driver-nya)
+          if [ "${{ inputs.gaming_tweaks }}" = "true" ]; then
+            for sym in CPU_INPUT_BOOST DEVFREQ_BOOST; do
+              if grep -rqs "config $sym\b" drivers/ kernel/ init/ 2>/dev/null; then
+                scripts/config --file out/.config -e $sym
+                echo "Aktif: CONFIG_$sym"
+              fi
+            done
+          fi
+
+          # NTSync (built-in, supaya /dev/ntsync langsung ada tanpa load modul)
+          if [ "${{ inputs.ntsync_enable }}" = "true" ]; then
+            if grep -q "config NTSYNC" drivers/misc/Kconfig 2>/dev/null; then
+              scripts/config --file out/.config -e NTSYNC
+            else
+              echo "::warning::CONFIG_NTSYNC tidak ada di Kconfig, dilewati"
+            fi
           fi
 
           # Nama kernel
@@ -292,9 +326,6 @@ jobs:
           scripts/config --file out/.config -d LOCALVERSION_AUTO
 
           make $MAKE_ARGS olddefconfig
-          if [ "${{ inputs.mglru_enable }}" = "true" ]; then
-            grep -E '^CONFIG_LRU_GEN' out/.config || { echo "::error::LRU_GEN hilang setelah olddefconfig (dependensi arch tidak terpenuhi)"; exit 1; }
-          fi
           make $MAKE_ARGS -j"$(nproc --all)" Image 2>&1 | tee build.log
 
           test -f out/arch/arm64/boot/Image || { echo "Build gagal: Image tidak ada"; exit 1; }
@@ -303,7 +334,7 @@ jobs:
         run: |
           ls -lh out/arch/arm64/boot/Image
           strings out/arch/arm64/boot/Image | grep -m1 "Linux version" || true
-          grep -E '^CONFIG_(LOCALVERSION|LTO_CLANG|CFI_CLANG|MODVERSIONS|LRU_GEN|KSU|KPROBES|CPU_FREQ_DEFAULT_GOV)' out/.config || true
+          grep -E '^CONFIG_(LOCALVERSION|LTO_CLANG|CFI_CLANG|MODVERSIONS|KSU|KPROBES|CPU_FREQ_DEFAULT_GOV|HZ|DEFAULT_TCP_CONG|CC_OPTIMIZE|NTSYNC)' out/.config || true
           cp out/.config kaelltzyy.config
 
       - name: Package AnyKernel3
@@ -347,11 +378,138 @@ jobs:
           cd ak3
           zip -r9 "../${KERNEL_NAME}-${DATE}.zip" . -x "*.git*"
 
+      - name: Buat modul KernelSU gaming (runtime tweak)
+        if: ${{ inputs.gaming_tweaks }}
+        run: |
+          mkdir -p gmod
+          cat > gmod/module.prop <<'EOF'
+          id=kaell_gaming_tweaks
+          name=Kaelltzyy Gaming Tweaks
+          version=1.0
+          versionCode=1
+          author=Kaell
+          description=Tweak runtime gaming: I/O, TCP, VM, scheduler (aman, semua dicek dulu)
+          EOF
+          cat > gmod/service.sh <<'EOF'
+          #!/system/bin/sh
+          # Tunggu boot selesai
+          while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 5; done
+          sleep 20
+
+          w() { [ -w "$2" ] && echo "$1" > "$2"; }
+
+          # --- CPU governor schedutil: respon naik cepat, turun agak lambat ---
+          for p in /sys/devices/system/cpu/cpufreq/policy*; do
+            w 0    "$p/schedutil/up_rate_limit_us"
+            w 3000 "$p/schedutil/down_rate_limit_us"
+          done
+
+          # --- I/O: kurangi overhead ---
+          for q in /sys/block/sd*/queue /sys/block/mmcblk*/queue /sys/block/dm-*/queue; do
+            w 0   "$q/iostats"
+            w 0   "$q/add_random"
+            w 2   "$q/rq_affinity"
+            w 128 "$q/read_ahead_kb"
+          done
+
+          # --- VM (diulang di userspace karena init vendor sering menimpa default kernel) ---
+          w 20  /proc/sys/vm/swappiness
+          w 50  /proc/sys/vm/vfs_cache_pressure
+          w 0   /proc/sys/vm/page-cluster
+          w 10  /proc/sys/vm/dirty_ratio
+          w 5   /proc/sys/vm/dirty_background_ratio
+          w 300 /proc/sys/vm/dirty_writeback_centisecs
+          w 500 /proc/sys/vm/dirty_expire_centisecs
+          # min_free_kbytes: tambah 5 MB dari nilai bawaan boot
+          MF=/proc/sys/vm/min_free_kbytes
+          [ -r "$MF" ] && w $(( $(cat "$MF") + 5120 )) "$MF"
+
+          # --- Network: latensi rendah ---
+          w bbr /proc/sys/net/ipv4/tcp_congestion_control
+          w 3   /proc/sys/net/ipv4/tcp_fastopen
+          w 1   /proc/sys/net/ipv4/tcp_low_latency
+          w 1   /proc/sys/net/ipv4/tcp_tw_reuse
+          w 1   /proc/sys/net/ipv4/tcp_mtu_probing
+
+          # --- NTSync: izinkan akses dari app (Wine/Winlator) ---
+          [ -e /dev/ntsync ] && chmod 666 /dev/ntsync
+
+          # --- Kurangi log kernel ---
+          w "0 0 0 0" /proc/sys/kernel/printk
+
+          # --- BORE (kalau ada): sedikit lebih agresif ke task interaktif ---
+          w 1 /proc/sys/kernel/sched_bore
+
+          # --- Touch boost: naikkan frekuensi CPU sebentar saat layar disentuh ---
+          # Hanya node yang ada di kernel ini yang ditulis (w() melewati yang tidak ada)
+          BF=""
+          for p in /sys/devices/system/cpu/cpufreq/policy*; do
+            [ -r "$p/cpuinfo_max_freq" ] || continue
+            mf=$(cat "$p/cpuinfo_max_freq")
+            # pakai ~80% frekuensi maks agar tidak terlalu panas
+            bf=$(( mf * 8 / 10 ))
+            for c in $(cat "$p/affected_cpus" 2>/dev/null); do BF="$BF $c:$bf"; done
+          done
+          BF="${BF# }"
+          for d in /sys/module/cpu_boost/parameters /sys/module/cpu_input_boost/parameters /sys/kernel/cpu_input_boost; do
+            [ -d "$d" ] || continue
+            w "$BF" "$d/input_boost_freq"
+            w 100   "$d/input_boost_ms"
+            w 100   "$d/input_boost_duration"
+          done
+
+          # --- Deteksi game start (daftar paket di games.txt, satu per baris) ---
+          GAMES="${0%/*}/games.txt"
+          on_game_start() {
+            pkg="$1"
+            # Proactive compaction saat game dibuka
+            w 1 /proc/sys/vm/compact_memory
+            # Swappiness tidak boleh lebih dari 20
+            [ "$(cat /proc/sys/vm/swappiness)" -gt 20 ] && w 20 /proc/sys/vm/swappiness
+            # OOM badness game dikurangi 50% (pendekatan: oom_score_adj dibagi dua bila positif)
+            for pid in $(pidof "$pkg"); do
+              adj=$(cat /proc/$pid/oom_score_adj 2>/dev/null)
+              [ -n "$adj" ] && [ "$adj" -gt 0 ] && w $((adj / 2)) /proc/$pid/oom_score_adj
+            done
+          }
+          if [ -f "$GAMES" ]; then
+            (
+              last=""
+              while true; do
+                sleep 5
+                fg=$(dumpsys activity activities 2>/dev/null | grep -m1 -E 'ResumedActivity' | sed -E 's/.* ([A-Za-z0-9_.]+)\/.*/\1/')
+                if [ -n "$fg" ] && [ "$fg" != "$last" ]; then
+                  last="$fg"
+                  grep -qx "$fg" "$GAMES" && on_game_start "$fg"
+                fi
+              done
+            ) &
+          fi
+          EOF
+          cat > gmod/games.txt <<'EOF'
+          com.tencent.ig
+          com.mobile.legends
+          com.dts.freefireth
+          com.miHoYo.GenshinImpact
+          com.activision.callofduty.shooter
+          com.garena.game.codm
+          EOF
+          chmod 755 gmod/service.sh
+          cd gmod
+          zip -r9 "../kaell-gaming-module-${ZIP_NAME#*-}.zip" . -x "*.git*"
+
       - name: Upload zip
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ZIP_NAME }}
           path: ${{ env.ZIP_NAME }}.zip
+
+      - name: Upload modul gaming
+        if: ${{ inputs.gaming_tweaks }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kaell-gaming-module
+          path: kaell-gaming-module-*.zip
 
       - name: Upload log
         if: always()

@@ -220,6 +220,21 @@ jobs:
                 r"(new_min_free_kbytes\s*=\s*int_sqrt\(lowmem_kbytes\s*\*\s*16\);)",
                 r"\g<1>\n\tnew_min_free_kbytes += 5120;", "min_free_kbytes")
 
+          # Watermark scale 30: kswapd bangun lebih awal, kurangi direct reclaim (stutter)
+          patch("mm/page_alloc.c", r"(int watermark_scale_factor\s*=\s*)\d+;", r"\g<1>30;", "watermark_scale_factor")
+          # Watermark boost off: kswapd tidak agresif reclaim berlebihan setelah fragmentasi
+          patch("mm/page_alloc.c", r"(int watermark_boost_factor[^=;]*=\s*)\d+;", r"\g<1>0;", "watermark_boost_factor")
+          # Tanpa dump semua task saat OOM (hindari stall panjang)
+          patch("mm/oom_kill.c", r"(int sysctl_oom_dump_tasks\s*=\s*)\d+;", r"\g<1>0;", "oom_dump_tasks")
+          # max_map_count 262144: game besar (Unity/Unreal) tidak mentok limit mmap
+          patch("include/linux/mm.h",
+                r"(#define DEFAULT_MAX_MAP_COUNT\s+)\(USHRT_MAX - MAPCOUNT_ELF_CORE_MARGIN\)",
+                r"\g<1>262144", "max_map_count")
+          # Read-ahead I/O 512KB (default 128KB): loading asset/map game lebih cepat
+          patch("include/linux/mm.h", r"(VM_READAHEAD_PAGES\s+\(SZ_)128K", r"\g<1>512K", "readahead_512k")
+          # Page cluster 0: tanpa swap readahead (percuma di zram)
+          patch("mm/swap.c", r"page_cluster = \d+;", "page_cluster = 0;", "page_cluster", count=0)
+
           # Proactive compaction: helper dipanggil governor kaelltzyy saat start
           try:
               c = open("mm/compaction.c").read()
@@ -349,10 +364,21 @@ jobs:
             scripts/config --file out/.config -e TCP_CONG_ADVANCED -e TCP_CONG_BBR \
               -d DEFAULT_CUBIC -d DEFAULT_RENO -e DEFAULT_BBR --set-str DEFAULT_TCP_CONG "bbr"
 
+            # Qdisc default fq: pacing rapi berpasangan dengan BBR
+            scripts/config --file out/.config -e NET_SCH_FQ \
+              -d DEFAULT_PFIFO_FAST -d DEFAULT_FQ_CODEL -d DEFAULT_SFQ -e DEFAULT_FQ \
+              --set-str DEFAULT_NET_SCH "fq"
+
+            # Loglevel console kecil: printk tidak makan CPU
+            scripts/config --file out/.config --set-val CONSOLE_LOGLEVEL_DEFAULT 4
+
             # BORE scheduler aktif kalau symbol-nya ada di source
             if grep -rq "config SCHED_BORE" init/Kconfig kernel/sched/Kconfig 2>/dev/null; then
               scripts/config --file out/.config -e SCHED_BORE
             fi
+
+            # Memori: matikan zeroing halaman tiap alloc/free + tracking zram (overhead tanpa guna di HP)
+            scripts/config --file out/.config -d INIT_ON_ALLOC_DEFAULT_ON -d INIT_ON_FREE_DEFAULT_ON -d ZRAM_MEMORY_TRACKING
 
             # Preempt penuh untuk latensi input/frame terendah
             scripts/config --file out/.config -d PREEMPT_NONE -d PREEMPT_VOLUNTARY -e PREEMPT
@@ -377,7 +403,7 @@ jobs:
         run: |
           ls -lh out/arch/arm64/boot/Image
           strings out/arch/arm64/boot/Image | grep -m1 "Linux version" || true
-          grep -E '^CONFIG_(HZ|PREEMPT|SCHED_DEBUG|SCHEDSTATS|SCHED_BORE|UCLAMP|CC_OPTIMIZE|LOCALVERSION|LTO_CLANG|CFI_CLANG|MODVERSIONS|KSU|KPROBES|WQ_POWER_EFFICIENT|RCU_BOOST|RCU_EXPERT|ZRAM|CRYPTO_LZ4|TCP_CONG_BBR|DEFAULT_TCP_CONG|DEFAULT_BBR|CPU_FREQ_GOV_KAELLTZYY|CPU_FREQ_DEFAULT_GOV)' out/.config || true
+          grep -E '^CONFIG_(HZ|PREEMPT|INIT_ON|SCHED_DEBUG|SCHEDSTATS|SCHED_BORE|UCLAMP|CC_OPTIMIZE|LOCALVERSION|LTO_CLANG|CFI_CLANG|MODVERSIONS|KSU|KPROBES|WQ_POWER_EFFICIENT|RCU_BOOST|RCU_EXPERT|ZRAM|CRYPTO_LZ4|TCP_CONG_BBR|DEFAULT_TCP_CONG|DEFAULT_BBR|DEFAULT_NET_SCH|DEFAULT_FQ|NET_SCH_FQ|CONSOLE_LOGLEVEL_DEFAULT|CPU_FREQ_GOV_KAELLTZYY|CPU_FREQ_DEFAULT_GOV)' out/.config || true
           cp out/.config kaelltzyy.config
 
       - name: Package AnyKernel3

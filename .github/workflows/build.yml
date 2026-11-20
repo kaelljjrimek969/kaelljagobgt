@@ -16,7 +16,7 @@ on:
         required: true
         default: "gki_defconfig"
       lto_mode:
-        description: "LTO mode"
+        description: "LTO mode (hindari none di GKI: CFI ikut mati, modul vendor bisa gagal load)"
         type: choice
         default: "thin"
         options:
@@ -32,6 +32,10 @@ on:
         description: "Jadikan governor kaelltzyy sebagai default"
         type: boolean
         default: false
+      brutal_tuning:
+        description: "Tuning gaming brutal (sched latency, BBR, dll). Matikan kalau bootloop untuk bisect"
+        type: boolean
+        default: true
 
 env:
   KERNEL_NAME: kaelljagobgt
@@ -49,7 +53,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 150
 
     steps:
       - name: Checkout source
@@ -80,6 +84,14 @@ jobs:
             libncurses-dev lz4 python3 rsync unzip zip xz-utils zstd cpio \
             libarchive-tools device-tree-compiler
 
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ inputs.source_repo }}-${{ inputs.source_ref }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ inputs.source_repo }}-${{ inputs.source_ref }}-
+
       - name: Download Neutron clang
         run: |
           mkdir -p "$HOME/neutron"
@@ -105,6 +117,7 @@ jobs:
           #include <linux/cpufreq.h>
           #include <linux/init.h>
           #include <linux/module.h>
+          #include <linux/workqueue.h>
 
           static void cpufreq_gov_kaelltzyy_limits(struct cpufreq_policy *policy)
           {
@@ -178,7 +191,7 @@ jobs:
           PY
           grep -n -i kaelltzyy drivers/cpufreq/Kconfig
 
-      - name: Default VM + OOM + ZRAM lz4
+      - name: Default VM + ZRAM + proactive compaction
         run: |
           python3 - <<'PY'
           import re
@@ -206,10 +219,6 @@ jobs:
           patch("mm/page_alloc.c",
                 r"(new_min_free_kbytes\s*=\s*int_sqrt\(lowmem_kbytes\s*\*\s*16\);)",
                 r"\g<1>\n\tnew_min_free_kbytes += 5120;", "min_free_kbytes")
-          # OOM badness halving 50% (proses oom_score_adj <= 0 dibadness-kan setengah)
-          patch("mm/oom_kill.c",
-                r"(\tadj \*= totalpages / 1000;\n\tpoints \+= adj;\n)",
-                r"\g<1>\tif (adj <= 0)\n\t\tpoints /= 2;\n", "oom_halving")
 
           # Proactive compaction: helper dipanggil governor kaelltzyy saat start
           try:
@@ -223,12 +232,43 @@ jobs:
           }
           EXPORT_SYMBOL_GPL(kaelltzyy_compact_memory);
           #endif
-          """.replace("\n          ", "\n")
+          """
                   open("mm/compaction.c", "w").write(c); print("OK compact helper")
           except Exception as e:
               print("::warning::compact helper gagal:", e)
           PY
-          grep -n "adj <= 0" mm/oom_kill.c || true
+
+      - name: Tuning gaming brutal (source scheduler)
+        if: ${{ inputs.brutal_tuning }}
+        run: |
+          python3 - <<'PY'
+          import re
+          def patch(paths, pattern, repl, label):
+              done = False
+              for path in paths:
+                  try:
+                      s = open(path).read()
+                  except FileNotFoundError:
+                      continue
+                  n, k = re.subn(pattern, repl, s)
+                  if k:
+                      open(path, "w").write(n)
+                      print(f"OK {label} ({path}, {k}x)")
+                      done = True
+              if not done:
+                  print(f"::warning::{label}: pola tidak ketemu (dilewati, tidak fatal)")
+
+          sched = ["kernel/sched/fair.c", "kernel/sched/core.c", "kernel/sched/sched.h"]
+          # Latency scheduler lebih rapat: respons input/frame lebih cepat
+          patch(sched, r"(sysctl_sched_latency\s*=\s*)\d+(?:ULL|UL);", r"\g<1>3000000ULL;", "sched_latency 3ms")
+          patch(sched, r"(sysctl_sched_min_granularity\s*=\s*)\d+(?:ULL|UL);", r"\g<1>400000ULL;", "sched_min_granularity 0.4ms")
+          patch(sched, r"(sysctl_sched_wakeup_granularity\s*=\s*)\d+(?:ULL|UL);", r"\g<1>500000UL;", "sched_wakeup_granularity 0.5ms")
+          # Task lebih cepat boleh migrasi antar core
+          patch(sched, r"(sysctl_sched_migration_cost\s*=\s*)\d+(?:ULL|UL);", r"\g<1>200000UL;", "sched_migration_cost 0.2ms")
+          PY
+          echo "--- ringkasan perubahan source ---"
+          git status --short | head -n 30 || true
+          git diff --stat | tail -n 20 || true
 
       - name: Info versi kernel
         run: |
@@ -241,14 +281,20 @@ jobs:
 
       - name: Build kernel
         run: |
+          set -o pipefail
           export PATH="$HOME/neutron/bin:$PATH"
           export CCACHE_DIR="$HOME/.ccache"
+          export CCACHE_MAXSIZE=5G
+          export CCACHE_BASEDIR="$PWD"
           export KBUILD_BUILD_USER="kaell"
           export KBUILD_BUILD_HOST="github-actions"
+          ccache -z || true
 
-          MAKE_ARGS="ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- CC=clang"
+          MAKE_ARGS=(ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out
+            CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+            CC="ccache clang")
 
-          make $MAKE_ARGS ${{ inputs.defconfig }}
+          make "${MAKE_ARGS[@]}" ${{ inputs.defconfig }}
 
           # LTO
           case "${{ inputs.lto_mode }}" in
@@ -266,15 +312,18 @@ jobs:
               ;;
           esac
 
-          # Governor Kaelltzyy
+          # Governor Kaelltzyy (built-in, bukan module)
           scripts/config --file out/.config -e CPU_FREQ_GOV_KAELLTZYY
           if [ "${{ inputs.kaelltzyy_default }}" = "true" ]; then
             scripts/config --file out/.config -d CPU_FREQ_DEFAULT_GOV_SCHEDUTIL -e CPU_FREQ_DEFAULT_GOV_KAELLTZYY
           fi
 
-          # ZRAM default lz4
-          scripts/config --file out/.config -e ZRAM -e CRYPTO_LZ4 -e LZ4_COMPRESS -e LZ4_DECOMPRESS \
-            -d ZRAM_DEF_COMP_LZO -d ZRAM_DEF_COMP_ZSTD -e ZRAM_DEF_COMP_LZ4 --set-str ZRAM_DEF_COMP "lz4"
+          # ZRAM + lz4 built-in (=y) supaya tidak butuh module
+          scripts/config --file out/.config \
+            -e ZRAM -e CRYPTO_LZ4 -e CRYPTO_LZ4HC -e LZ4_COMPRESS -e LZ4_DECOMPRESS \
+            -d ZRAM_DEF_COMP_LZORLE -d ZRAM_DEF_COMP_LZO -d ZRAM_DEF_COMP_ZSTD \
+            -d ZRAM_DEF_COMP_LZ4HC -d ZRAM_DEF_COMP_842 \
+            -e ZRAM_DEF_COMP_LZ4
           scripts/config --file out/.config -e COMPACTION
 
           # Timer frequency 1000 Hz
@@ -294,25 +343,41 @@ jobs:
             scripts/config --file out/.config -d CC_OPTIMIZE_FOR_PERFORMANCE -e CC_OPTIMIZE_FOR_PERFORMANCE_O3
           fi
 
+          # ===== Tuning gaming brutal (semua built-in, tanpa module) =====
+          if [ "${{ inputs.brutal_tuning }}" = "true" ]; then
+            # TCP BBR (v3 dari source) jadi default: ping game lebih stabil
+            scripts/config --file out/.config -e TCP_CONG_ADVANCED -e TCP_CONG_BBR \
+              -d DEFAULT_CUBIC -d DEFAULT_RENO -e DEFAULT_BBR --set-str DEFAULT_TCP_CONG "bbr"
+
+            # BORE scheduler aktif kalau symbol-nya ada di source
+            if grep -rq "config SCHED_BORE" init/Kconfig kernel/sched/Kconfig 2>/dev/null; then
+              scripts/config --file out/.config -e SCHED_BORE
+            fi
+
+            # Preempt penuh untuk latensi input/frame terendah
+            scripts/config --file out/.config -d PREEMPT_NONE -d PREEMPT_VOLUNTARY -e PREEMPT
+          fi
+
           # KernelSU-Next (hook pakai kprobe)
           if [ "${{ inputs.ksu_enable }}" = "true" ]; then
-            scripts/config --file out/.config -e KSU -e KPROBES -e HAVE_KPROBES -e KPROBE_EVENTS
+            scripts/config --file out/.config -e KSU -e KPROBES -e KPROBE_EVENTS
           fi
 
           # Nama kernel
           scripts/config --file out/.config --set-str LOCALVERSION "-${KERNEL_LOCALVERSION}"
           scripts/config --file out/.config -d LOCALVERSION_AUTO
 
-          make $MAKE_ARGS olddefconfig
-          make $MAKE_ARGS KCFLAGS="-O3" -j"$(nproc --all)" Image 2>&1 | tee build.log
+          make "${MAKE_ARGS[@]}" olddefconfig
+          make "${MAKE_ARGS[@]}" KCFLAGS="-O3 -Wno-error" -j"$(nproc --all)" Image 2>&1 | tee build.log
 
+          ccache -s || true
           test -f out/arch/arm64/boot/Image || { echo "Build gagal: Image tidak ada"; exit 1; }
 
       - name: Cek hasil build
         run: |
           ls -lh out/arch/arm64/boot/Image
           strings out/arch/arm64/boot/Image | grep -m1 "Linux version" || true
-          grep -E '^CONFIG_(HZ|SCHED_DEBUG|SCHEDSTATS|UCLAMP|CC_OPTIMIZE|LOCALVERSION|LTO_CLANG|CFI_CLANG|MODVERSIONS|KSU|KPROBES|WQ_POWER_EFFICIENT|RCU_BOOST|RCU_EXPERT|ZRAM|CPU_FREQ_DEFAULT_GOV)' out/.config || true
+          grep -E '^CONFIG_(HZ|PREEMPT|SCHED_DEBUG|SCHEDSTATS|SCHED_BORE|UCLAMP|CC_OPTIMIZE|LOCALVERSION|LTO_CLANG|CFI_CLANG|MODVERSIONS|KSU|KPROBES|WQ_POWER_EFFICIENT|RCU_BOOST|RCU_EXPERT|ZRAM|CRYPTO_LZ4|TCP_CONG_BBR|DEFAULT_TCP_CONG|DEFAULT_BBR|CPU_FREQ_GOV_KAELLTZYY|CPU_FREQ_DEFAULT_GOV)' out/.config || true
           cp out/.config kaelltzyy.config
 
       - name: Package AnyKernel3

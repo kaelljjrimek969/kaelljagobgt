@@ -285,6 +285,12 @@ jobs:
           patch(sched, r"(sysctl_sched_wakeup_granularity\s*=\s*)\d+(?:ULL|UL);", r"\g<1>500000UL;", "sched_wakeup_granularity 0.5ms")
           # Task lebih cepat boleh migrasi antar core
           patch(sched, r"(sysctl_sched_migration_cost\s*=\s*)\d+(?:ULL|UL);", r"\g<1>200000UL;", "sched_migration_cost 0.2ms")
+          # EAS off: scheduler tidak lagi menimbang hemat energi, task game lebih sering ke core besar
+          patch(["kernel/sched/topology.c"], r"(sysctl_sched_energy_aware\s*=\s*)1;", r"\g<1>0;", "eas_off")
+          # TCP: jangan reset congestion window setelah koneksi idle (game online, lompat ping)
+          patch(["net/ipv4/tcp_ipv4.c"], r"(sysctl_tcp_slow_start_after_idle\s*=\s*)1;", r"\g<1>0;", "tcp_slow_start_after_idle_off")
+          # BORE: toleransi burst 22 -> 24 (~4ms -> ~16ms): thread game yang jalan ~1 frame tidak dipenalti prioritasnya
+          patch(["kernel/sched/fair.c"], r"(sched_burst_penalty_offset\s*=\s*)\d+;", r"\g<1>24;", "bore_penalty_offset 24")
           PY
           echo "--- ringkasan perubahan source ---"
           git status --short | head -n 30 || true
@@ -389,6 +395,9 @@ jobs:
             # Memori: matikan zeroing halaman tiap alloc/free + tracking zram (overhead tanpa guna di HP)
             scripts/config --file out/.config -d INIT_ON_ALLOC_DEFAULT_ON -d INIT_ON_FREE_DEFAULT_ON -d ZRAM_MEMORY_TRACKING
 
+            # Statistik zsmalloc (debug) off + mitigasi Spectre-BHB off (overhead tiap syscall di core A76)
+            scripts/config --file out/.config -d ZSMALLOC_STAT -d MITIGATE_SPECTRE_BRANCH_HISTORY
+
             # Preempt penuh untuk latensi input/frame terendah
             scripts/config --file out/.config -d PREEMPT_NONE -d PREEMPT_VOLUNTARY -e PREEMPT
           fi
@@ -412,7 +421,7 @@ jobs:
         run: |
           ls -lh out/arch/arm64/boot/Image
           strings out/arch/arm64/boot/Image | grep -m1 "Linux version" || true
-          grep -E '^CONFIG_(HZ|PREEMPT|INIT_ON|SCHED_DEBUG|SCHEDSTATS|SCHED_BORE|UCLAMP|CC_OPTIMIZE|LOCALVERSION|LTO_CLANG|CFI_CLANG|MODVERSIONS|KSU|KPROBES|WQ_POWER_EFFICIENT|RCU_BOOST|RCU_EXPERT|ZRAM|CRYPTO_LZ4|TCP_CONG_BBR|DEFAULT_TCP_CONG|DEFAULT_BBR|DEFAULT_NET_SCH|DEFAULT_FQ|NET_SCH_FQ|CONSOLE_LOGLEVEL_DEFAULT|CPU_FREQ_GOV_KAELLTZYY|CPU_FREQ_DEFAULT_GOV)' out/.config || true
+          grep -E '^CONFIG_(HZ|PREEMPT|INIT_ON|ZSMALLOC|MITIGATE_SPECTRE|SCHED_DEBUG|SCHEDSTATS|SCHED_BORE|UCLAMP|CC_OPTIMIZE|LOCALVERSION|LTO_CLANG|CFI_CLANG|MODVERSIONS|KSU|KPROBES|WQ_POWER_EFFICIENT|RCU_BOOST|RCU_EXPERT|ZRAM|CRYPTO_LZ4|TCP_CONG_BBR|DEFAULT_TCP_CONG|DEFAULT_BBR|DEFAULT_NET_SCH|DEFAULT_FQ|NET_SCH_FQ|CONSOLE_LOGLEVEL_DEFAULT|CPU_FREQ_GOV_KAELLTZYY|CPU_FREQ_DEFAULT_GOV)' out/.config || true
           cp out/.config kaelltzyy.config
 
       - name: Package AnyKernel3

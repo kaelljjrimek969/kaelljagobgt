@@ -232,6 +232,11 @@ jobs:
                 r"\g<1>262144", "max_map_count")
           # Read-ahead I/O 512KB (default 128KB): loading asset/map game lebih cepat
           patch("include/linux/mm.h", r"(VM_READAHEAD_PAGES\s+\(SZ_)128K", r"\g<1>512K", "readahead_512k")
+          # ZRAM: paksa lz4 walau Android/vendor menulis algoritma lain (fallback aman kalau lz4 tidak tersedia)
+          patch("drivers/block/zram/zram_drv.c",
+                r'strcpy\(zram->compressor, compressor\);',
+                'strcpy(zram->compressor, zcomp_available_algorithm("lz4") ? "lz4" : compressor);',
+                "zram_force_lz4")
           # Page cluster 0: tanpa swap readahead (percuma di zram)
           patch("mm/swap.c", r"page_cluster = \d+;", "page_cluster = 0;", "page_cluster", count=0)
 
@@ -284,6 +289,8 @@ jobs:
           echo "--- ringkasan perubahan source ---"
           git status --short | head -n 30 || true
           git diff --stat | tail -n 20 || true
+          echo "--- diff sched (hanya baris berubah) ---"
+          git diff -U0 kernel/sched/ | grep -E '^[+-][^+-]' | head -n 60 || true
 
       - name: Info versi kernel
         run: |
@@ -291,6 +298,8 @@ jobs:
           git log -3 --oneline || true
           echo "--- BORE ---"
           grep -rn "SCHED_BORE" init/Kconfig kernel/sched/Kconfig 2>/dev/null | head -3 || true
+          echo "--- BORE tunables (nama parameter) ---"
+          grep -rn "burst" kernel/sched/fair.c kernel/sysctl.c include/linux/sched.h 2>/dev/null | head -n 40 || true
           echo "--- BBR ---"
           grep -n -i "bbrv3\|BBR v3" net/ipv4/tcp_bbr.c | head -3 || true
 
